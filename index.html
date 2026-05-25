@@ -370,6 +370,15 @@ function draw(){
   }
 
   drawMM();
+
+  // Debug overlay
+  const allP = Object.keys(players).length;
+  const others = Object.keys(players).filter(id=>id!==myId).length;
+  ctx.fillStyle = '#00ff5080';
+  ctx.font = '11px Share Tech Mono';
+  ctx.textAlign = 'left';
+  ctx.fillText(`МОЙ ID: ${myId.slice(-6)}`, 10, canvas.height - 40);
+  ctx.fillText(`ИГРОКОВ В БД: ${allP} | ДРУГИХ: ${others}`, 10, canvas.height - 24);
 }
 
 function drawPlayer(p,isMe){
@@ -452,10 +461,10 @@ function loop(now){
     }
   }
   // Sync
-  if(now-lastSync>150){lastSync=now;pushPlayer();}
-  if(now-lastPoll>600){lastPoll=now;pollPlayers();}
-  if(now-lastHPoll>350){lastHPoll=now;pollHits();}
-  if(now-lastBPoll>700){lastBPoll=now;pollBullets();}
+  if(now-lastSync>100){lastSync=now;pushPlayer();}
+  if(now-lastPoll>300){lastPoll=now;pollPlayers();}
+  if(now-lastHPoll>250){lastHPoll=now;pollHits();}
+  if(now-lastBPoll>400){lastBPoll=now;pollBullets();}
 
   draw();
 }
