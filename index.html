@@ -589,10 +589,10 @@ function loop(now){
   }
 
   // Periodic sync
-  const syncDelay=errCount>3?2000:80; if(now-ltSync>syncDelay){ltSync=now;pushMe();}
-  if(now-ltPlayers>150){ltPlayers=now;fetchPlayers();}
-  if(now-ltBullets>500){ltBullets=now;fetchBullets();}
-  if(now-ltHits>300){ltHits=now;fetchHits();}
+  if(now-ltSync>500){ltSync=now;pushMe();}
+  if(now-ltPlayers>1500){ltPlayers=now;fetchPlayers();}
+  if(now-ltBullets>1000){ltBullets=now;fetchBullets();}
+  if(now-ltHits>800){ltHits=now;fetchHits();}
 
   draw();
 }
