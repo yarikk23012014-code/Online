@@ -320,7 +320,19 @@ async function fetchPlayers(){
     if(row.id===myId)continue;
     const age=now-new Date(row.updated_at).getTime();
     if(age<10000){
-      players[row.id]=row.data;
+      const incoming=row.data;
+      if(players[row.id]){
+        // Smooth interpolation instead of teleport
+        players[row.id].tx=incoming.x;
+        players[row.id].ty=incoming.y;
+        players[row.id].angle=incoming.angle;
+        players[row.id].hp=incoming.hp;
+        players[row.id].alive=incoming.alive;
+        players[row.id].color=incoming.color;
+        players[row.id].name=incoming.name;
+      } else {
+        players[row.id]={...incoming, tx:incoming.x, ty:incoming.y};
+      }
     } else {
       delete players[row.id];
       sb.from('players').delete().eq('id',row.id).then();
@@ -540,6 +552,15 @@ function loop(now){
     if(!jActive)me.angle=Math.atan2(mouse.y-cv.height/2,mouse.x-cv.width/2);
     camX=me.x-cv.width/2;
     camY=me.y-cv.height/2;
+  }
+
+  // Interpolate other players smoothly
+  for(const[id,p] of Object.entries(players)){
+    if(id===myId||!p)continue;
+    if(p.tx!==undefined){
+      p.x+=(p.tx-p.x)*0.2;
+      p.y+=(p.ty-p.y)*0.2;
+    }
   }
 
   // Bullet update + collision
