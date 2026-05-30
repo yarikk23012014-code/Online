@@ -355,6 +355,200 @@ function drawMM(){
   }
 }
 
+
+// ═══════════════════════════════════════
+//  BOT SYSTEM
+// ═══════════════════════════════════════
+const bots = {}; // id -> bot state
+
+function getBotTarget(botId) {
+  // Find nearest alive enemy
+  const bot = players[botId];
+  if (!bot) return null;
+  let nearest = null, minDist = Infinity;
+  for (const [pid, p] of Object.entries(players)) {
+    if (pid === botId || !p || !p.alive || p.isBot) continue;
+    const d = Math.hypot(p.x - bot.x, p.y - bot.y);
+    if (d < minDist) { minDist = d; nearest = { pid, p, d }; }
+  }
+  return nearest;
+}
+
+function hasLineOfSight(x1, y1, x2, y2) {
+  const steps = 30;
+  for (let i = 0; i <= steps; i++) {
+    const t = i / steps;
+    const x = x1 + (x2 - x1) * t;
+    const y = y1 + (y2 - y1) * t;
+    if (wallAt(x, y)) return false;
+  }
+  return true;
+}
+
+function findCoverFrom(bot, tx, ty) {
+  // Find a nearby wall tile to hide behind
+  const r = rng32((Date.now() * Math.random()) | 0);
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const angle = r() * Math.PI * 2;
+    const dist = 80 + r() * 100;
+    const cx = bot.x + Math.cos(angle) * dist;
+    const cy = bot.y + Math.sin(angle) * dist;
+    if (!hitsWall(cx, cy, PR) && !hasLineOfSight(cx, cy, tx, ty)) {
+      return { x: cx, y: cy };
+    }
+  }
+  return null;
+}
+
+let lastBotTick = 0;
+function tickBots(now) {
+  if (now - lastBotTick < 150) return;
+  lastBotTick = now;
+
+  for (const [bid, bs] of Object.entries(bots)) {
+    const bot = players[bid];
+    if (!bot || !bot.alive) continue;
+
+    const target = getBotTarget(bid);
+
+    // Init bot state
+    if (!bs.state) bs.state = 'roam';
+    if (!bs.roamTarget) bs.roamTarget = null;
+    if (!bs.shootCd) bs.shootCd = 0;
+    if (!bs.coverPos) bs.coverPos = null;
+    if (!bs.stuckTimer) bs.stuckTimer = 0;
+    if (!bs.lastX) { bs.lastX = bot.x; bs.lastY = bot.y; }
+
+    // Check if stuck
+    if (Math.hypot(bot.x - bs.lastX, bot.y - bs.lastY) < 2) {
+      bs.stuckTimer++;
+      if (bs.stuckTimer > 20) { bs.roamTarget = null; bs.coverPos = null; bs.stuckTimer = 0; }
+    } else { bs.stuckTimer = 0; }
+    bs.lastX = bot.x; bs.lastY = bot.y;
+
+    if (target && target.d < 400) {
+      const los = hasLineOfSight(bot.x, bot.y, target.p.x, target.p.y);
+
+      if (los) {
+        // Can see enemy — aim and shoot
+        bs.state = 'attack';
+        bs.coverPos = null;
+        bot.angle = Math.atan2(target.p.y - bot.y, target.p.x - bot.x);
+
+        // Strafe sideways while shooting
+        const perpAngle = bot.angle + Math.PI / 2;
+        bs.moveDir = bs.moveDir || (Math.random() > 0.5 ? 1 : -1);
+        if (Math.random() < 0.02) bs.moveDir *= -1;
+        const sdx = Math.cos(perpAngle) * bs.moveDir;
+        const sdy = Math.sin(perpAngle) * bs.moveDir;
+        const nx = bot.x + sdx * SPD * 0.7;
+        const ny = bot.y + sdy * SPD * 0.7;
+        if (!hitsWall(nx, bot.y, PR - 1)) bot.x = nx;
+        if (!hitsWall(bot.x, ny, PR - 1)) bot.y = ny;
+
+        // Shoot
+        if (now - bs.shootCd > 400 + Math.random() * 300) {
+          bs.shootCd = now;
+          // Add slight inaccuracy
+          const inaccuracy = (Math.random() - 0.5) * 0.3;
+          const ang = bot.angle + inaccuracy;
+          const b = {
+            id: bid + '_' + now,
+            oid: bid,
+            x: bot.x + Math.cos(ang) * (PR + 6),
+            y: bot.y + Math.sin(ang) * (PR + 6),
+            vx: Math.cos(ang) * BS,
+            vy: Math.sin(ang) * BS,
+            life: BL, ts: now
+          };
+          bullets.push(b);
+          db.ref('bullets/' + b.id).set(b);
+          setTimeout(() => db.ref('bullets/' + b.id).remove(), 2000);
+        }
+      } else {
+        // No LOS — go to cover or approach
+        if (target.d > 150) {
+          // Approach enemy
+          bs.state = 'chase';
+          const ang = Math.atan2(target.p.y - bot.y, target.p.x - bot.x);
+          bot.angle = ang;
+          const nx = bot.x + Math.cos(ang) * SPD * 0.8;
+          const ny = bot.y + Math.sin(ang) * SPD * 0.8;
+          if (!hitsWall(nx, bot.y, PR - 1)) bot.x = nx;
+          if (!hitsWall(bot.x, ny, PR - 1)) bot.y = ny;
+        } else {
+          // Peek from cover
+          bs.state = 'peek';
+          if (!bs.coverPos || Math.random() < 0.05) {
+            bs.coverPos = findCoverFrom(bot, target.p.x, target.p.y);
+          }
+          if (bs.coverPos) {
+            const ang = Math.atan2(bs.coverPos.y - bot.y, bs.coverPos.x - bot.x);
+            const nx = bot.x + Math.cos(ang) * SPD * 0.6;
+            const ny = bot.y + Math.sin(ang) * SPD * 0.6;
+            if (!hitsWall(nx, bot.y, PR - 1)) bot.x = nx;
+            if (!hitsWall(bot.x, ny, PR - 1)) bot.y = ny;
+          }
+        }
+      }
+    } else {
+      // No target — roam
+      bs.state = 'roam';
+      if (!bs.roamTarget || Math.hypot(bot.x - bs.roamTarget.x, bot.y - bs.roamTarget.y) < 30) {
+        // Pick new random roam target
+        const r2 = rng32((Date.now() + Math.random() * 9999) | 0);
+        for (let i = 0; i < 50; i++) {
+          const tx = 1 + Math.floor(r2() * (MW - 2));
+          const ty = 1 + Math.floor(r2() * (MH - 2));
+          if (MAP[ty]?.[tx] === 0) { bs.roamTarget = { x: tx * TILE + TILE / 2, y: ty * TILE + TILE / 2 }; break; }
+        }
+      }
+      if (bs.roamTarget) {
+        const ang = Math.atan2(bs.roamTarget.y - bot.y, bs.roamTarget.x - bot.x);
+        bot.angle = ang;
+        const nx = bot.x + Math.cos(ang) * SPD * 0.6;
+        const ny = bot.y + Math.sin(ang) * SPD * 0.6;
+        if (!hitsWall(nx, bot.y, PR - 1)) bot.x = nx;
+        if (!hitsWall(bot.x, ny, PR - 1)) bot.y = ny;
+      }
+    }
+
+    // Push bot position
+    if (now - (bs.lastPush || 0) > 200) {
+      bs.lastPush = now;
+      db.ref('players/' + bid).set({
+        id: bid, x: bot.x, y: bot.y, angle: bot.angle,
+        hp: bot.hp, alive: bot.alive, color: bot.color,
+        name: bot.name, ts: Date.now(), isBot: true
+      });
+    }
+  }
+}
+
+// Check for inactive players and spawn bots
+let lastBotCheck = 0;
+function checkInactivePlayers(now) {
+  if (now - lastBotCheck < 2000) return;
+  lastBotCheck = now;
+  for (const [pid, p] of Object.entries(players)) {
+    if (pid === myId) continue;
+    if (p.isBot) continue;
+    const age = now - (p.ts || 0);
+    // If inactive for 12s and no bot yet
+    if (age > 12000 && !bots[pid]) {
+      bots[pid] = {};
+      players[pid].isBot = true;
+      kfeed('🤖 ' + (p.name || pid) + ' заменён ботом');
+    }
+    // If player came back (fresh ts) and was bot
+    if (age < 2000 && bots[pid]) {
+      delete bots[pid];
+      players[pid].isBot = false;
+      kfeed('👤 ' + (p.name || pid) + ' вернулся!');
+    }
+  }
+}
+
 let ltPush=0;
 function loop(now){
   requestAnimationFrame(loop);
@@ -376,6 +570,10 @@ function loop(now){
     // Push to Firebase every 100ms
     if(now-ltPush>100){ltPush=now;pushMe();}
   }
+
+  // Bot AI
+  tickBots(now);
+  checkInactivePlayers(now);
 
   // Interpolate others
   for(const[id,p]of Object.entries(players)){
