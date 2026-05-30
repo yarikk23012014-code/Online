@@ -291,13 +291,110 @@ function respawn(){
 
 // Draw
 const FL=['#0b160b','#0c180c','#0d1a0d'];
+// ═══════════════════════════════
+//  RAYCASTING LIGHTING SYSTEM
+// ═══════════════════════════════
+const RAYS = 360;
+const LIGHT_DIST = 280;
+
+function castRay(ox, oy, angle) {
+  const dx = Math.cos(angle), dy = Math.sin(angle);
+  let dist = 0;
+  const step = 4;
+  while (dist < LIGHT_DIST) {
+    dist += step;
+    const x = ox + dx * dist, y = oy + dy * dist;
+    if (wallAt(x, y)) return dist;
+  }
+  return LIGHT_DIST;
+}
+
+function buildVisibilityPolygon(ox, oy) {
+  const points = [];
+  // Cast rays in full circle
+  for (let i = 0; i < RAYS; i++) {
+    const angle = (i / RAYS) * Math.PI * 2;
+    const dist = castRay(ox, oy, angle);
+    points.push({
+      x: ox + Math.cos(angle) * dist,
+      y: oy + Math.sin(angle) * dist
+    });
+  }
+  return points;
+}
+
+// Check if point is in visibility polygon (approximate via angle+dist)
+function isVisible(ox, oy, tx, ty) {
+  const angle = Math.atan2(ty - oy, tx - ox);
+  const dist = Math.hypot(tx - ox, ty - oy);
+  if (dist > LIGHT_DIST) return false;
+  const rayDist = castRay(ox, oy, angle);
+  return dist < rayDist + PR;
+}
+
+// Offscreen canvas for lighting
+let lightCanvas = null, lightCtx = null;
+function ensureLightCanvas(W, H) {
+  if (!lightCanvas || lightCanvas.width !== W || lightCanvas.height !== H) {
+    lightCanvas = document.createElement('canvas');
+    lightCanvas.width = W; lightCanvas.height = H;
+    lightCtx = lightCanvas.getContext('2d');
+  }
+}
+
+function drawLighting(me, W, H) {
+  ensureLightCanvas(W, H);
+  const lc = lightCtx;
+  lc.clearRect(0, 0, W, H);
+
+  // Full dark overlay
+  lc.fillStyle = '#000000dd';
+  lc.fillRect(0, 0, W, H);
+
+  // Build visibility polygon in world space, convert to screen
+  const poly = buildVisibilityPolygon(me.x, me.y);
+
+  // Cut out the lit area using composite
+  lc.globalCompositeOperation = 'destination-out';
+
+  // Soft light gradient
+  const screenX = me.x - camX, screenY = me.y - camY;
+  const grad = lc.createRadialGradient(screenX, screenY, 0, screenX, screenY, LIGHT_DIST);
+  grad.addColorStop(0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.6, 'rgba(255,255,255,0.95)');
+  grad.addColorStop(1, 'rgba(255,255,255,0)');
+  lc.fillStyle = grad;
+
+  lc.beginPath();
+  lc.moveTo(poly[0].x - camX, poly[0].y - camY);
+  for (let i = 1; i < poly.length; i++) {
+    lc.lineTo(poly[i].x - camX, poly[i].y - camY);
+  }
+  lc.closePath();
+  lc.fill();
+
+  lc.globalCompositeOperation = 'source-over';
+  return lightCanvas;
+}
+
 function draw(){
   const W=cv.width,H=cv.height;
   cx2.clearRect(0,0,W,H);
+
+  // Dark background
+  cx2.fillStyle='#050a05';
+  cx2.fillRect(0,0,W,H);
+
   cx2.save();cx2.translate(-camX,-camY);
+
   // Floor
   for(let ty=0;ty<MH;ty++)for(let tx=0;tx<MW;tx++){
-    if(MAP[ty][tx]===0){cx2.fillStyle=FL[(tx+ty)%3];cx2.fillRect(tx*TILE,ty*TILE,TILE,TILE);cx2.strokeStyle='#1a301a18';cx2.lineWidth=.5;cx2.strokeRect(tx*TILE,ty*TILE,TILE,TILE);}
+    if(MAP[ty][tx]===0){
+      cx2.fillStyle=FL[(tx+ty)%3];
+      cx2.fillRect(tx*TILE,ty*TILE,TILE,TILE);
+      cx2.strokeStyle='#1a301a18';cx2.lineWidth=.5;
+      cx2.strokeRect(tx*TILE,ty*TILE,TILE,TILE);
+    }
   }
   // Walls
   for(let ty=0;ty<MH;ty++)for(let tx=0;tx<MW;tx++){
@@ -307,21 +404,63 @@ function draw(){
     cx2.fillStyle='#0b1a0b70';cx2.fillRect(wx+TILE,wy,16,TILE);
     cx2.fillStyle='#1a3a1a';cx2.fillRect(wx,wy,TILE,TILE);
     cx2.fillStyle='#1f3e1f';cx2.fillRect(wx+3,wy+3,TILE-6,TILE-6);
-    cx2.strokeStyle='#2a5a2a45';cx2.lineWidth=1;cx2.strokeRect(wx+3,wy+3,TILE-6,TILE-6);
+    cx2.strokeStyle='#2a5a2a45';cx2.lineWidth=1;
+    cx2.strokeRect(wx+3,wy+3,TILE-6,TILE-6);
   }
+
   // Bullets
   for(const b of bullets){
     const own=b.oid===myId;
     cx2.save();cx2.shadowColor=own?'#ffe040':'#ff5050';cx2.shadowBlur=10;
     cx2.fillStyle=own?'#fff080':'#ff8080';cx2.beginPath();cx2.arc(b.x,b.y,3.5,0,Math.PI*2);cx2.fill();
-    cx2.globalAlpha=.3;cx2.fillStyle=own?'#ffd000':'#ff3030';cx2.beginPath();cx2.arc(b.x-b.vx*2,b.y-b.vy*2,2,0,Math.PI*2);cx2.fill();
+    cx2.globalAlpha=.3;cx2.fillStyle=own?'#ffd000':'#ff3030';
+    cx2.beginPath();cx2.arc(b.x-b.vx*2,b.y-b.vy*2,2,0,Math.PI*2);cx2.fill();
     cx2.restore();
   }
-  // Players
-  for(const[id,p]of Object.entries(players))if(p&&p.alive)drawP(p,id===myId);
+
+  // Players — only draw if visible to me
+  const me=players[myId];
+  for(const[id,p]of Object.entries(players)){
+    if(!p||!p.alive)continue;
+    if(id===myId){drawP(p,true);continue;}
+    // Check visibility
+    if(me&&me.alive&&isVisible(me.x,me.y,p.x,p.y)){
+      drawP(p,false);
+    } else if(me&&me.alive){
+      // Draw faint silhouette if very close
+      const d=Math.hypot(p.x-me.x,p.y-me.y);
+      if(d<TILE*1.5){
+        cx2.save();cx2.globalAlpha=0.15;drawP(p,false);cx2.restore();
+      }
+    }
+  }
+
   cx2.restore();
+
+  // Apply lighting overlay
+  if(me&&me.alive){
+    const lc=drawLighting(me,W,H);
+    cx2.drawImage(lc,0,0);
+  }
+
+  // Player light glow on screen (always visible, drawn on top)
+  if(me&&me.alive){
+    const sx=me.x-camX, sy=me.y-camY;
+    cx2.save();
+    const grd=cx2.createRadialGradient(sx,sy,0,sx,sy,40);
+    grd.addColorStop(0,'rgba(0,255,80,0.12)');
+    grd.addColorStop(1,'rgba(0,0,0,0)');
+    cx2.fillStyle=grd;
+    cx2.beginPath();cx2.arc(sx,sy,40,0,Math.PI*2);cx2.fill();
+    cx2.restore();
+  }
+
   // Reload
-  if(reloading){const pct=Math.min(1,(Date.now()-reloadAt)/RLD);document.getElementById('rlbf').style.width=(pct*100)+'%';if(pct>=1){reloading=false;const need=MAM-myAmmo,take=Math.min(need,myRes);myAmmo+=take;myRes-=take;setAm();document.getElementById('rlb').style.display='none';}}
+  if(reloading){
+    const pct=Math.min(1,(Date.now()-reloadAt)/RLD);
+    document.getElementById('rlbf').style.width=(pct*100)+'%';
+    if(pct>=1){reloading=false;const need=MAM-myAmmo,take=Math.min(need,myRes);myAmmo+=take;myRes-=take;setAm();document.getElementById('rlb').style.display='none';}
+  }
   drawMM();
 }
 
