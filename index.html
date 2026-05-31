@@ -577,11 +577,17 @@ function updateCapHUD(){
 }
 
 function endMatch(winner){
+  if(!matchStarted)return; // prevent double trigger
+  matchStarted=false;
   const win=(myTeam===winner);
   document.getElementById('dsTitle').textContent=win?'🏆 ПОБЕДА!':'💀 ПОРАЖЕНИЕ';
   document.getElementById('dsBy').textContent=(winner==='blue'?'Сталкеры':'Бандиты')+' захватили зону!';
+  document.getElementById('dsMode').textContent='Возврат в меню через 8 сек...';
   document.getElementById('ds').style.display='flex';
-  matchStarted=false;
+  // Clean match data so next game works
+  db.ref('match/'+matchId).remove();
+  db.ref('capture').remove();
+  db.ref('lobbies/'+lobbyId).remove();
   setTimeout(confirmExit,8000);
 }
 
@@ -889,6 +895,22 @@ async function initOpen(){
 async function initLobby(){
   await connectFB();
   document.getElementById('lobby').style.display='flex';
+  // Clean stale lobbies older than 10 minutes
+  const allSnap=await db.ref('lobbies').once('value');
+  const allData=allSnap.val()||{};
+  for(const[lid,ld]of Object.entries(allData)){
+    if(Date.now()-(ld.created||0)>600000){
+      db.ref('lobbies/'+lid).remove();
+      db.ref('match/match_'+lid).remove();
+    }
+  }
+  // Clean stale players older than 30s
+  const pSnap=await db.ref('players').once('value');
+  const pData=pSnap.val()||{};
+  for(const[pid,pd]of Object.entries(pData)){
+    if(Date.now()-(pd.ts||0)>30000)db.ref('players/'+pid).remove();
+  }
+  // Find active lobby
   const snap=await db.ref('lobbies').orderByChild('status').equalTo('waiting').limitToFirst(1).once('value');
   const data=snap.val();
   if(data){lobbyId=Object.keys(data)[0];}
@@ -913,10 +935,17 @@ function startLobbyCD(){
   let t=LOBBY_T;
   const iv=setInterval(async()=>{
     t--;
+    const lSnap=await db.ref('lobbies/'+lobbyId+'/status').once('value');
+    if(lSnap.val()==='starting'){clearInterval(iv);return;} // already starting
     const snap=await db.ref('lobbies/'+lobbyId+'/players').once('value');
     const pc=Object.keys(snap.val()||{}).length;
-    if(t<=0||pc>=MAX_P){clearInterval(iv);db.ref('lobbies/'+lobbyId+'/status').set('starting');db.ref('match/'+matchId).set({started:true,winner:null});}
-    else db.ref('lobbies/'+lobbyId+'/timer').set(t);
+    if(t<=0||pc>=MAX_P){
+      clearInterval(iv);
+      db.ref('lobbies/'+lobbyId+'/status').set('starting');
+      db.ref('match/'+matchId).set({started:true,winner:null});
+    } else {
+      db.ref('lobbies/'+lobbyId+'/timer').set(t);
+    }
   },1000);
 }
 
@@ -988,9 +1017,36 @@ function startUI(){
 function showExitConfirm(){document.getElementById('exitConfirm').style.display='flex';}
 function hideExitConfirm(){document.getElementById('exitConfirm').style.display='none';}
 function confirmExit(){
+  // Full cleanup
   db.ref('players/'+myId).remove();
-  running=false;spectating=false;players={};bullets=[];botStates={};
-  ['exitConfirm','ds','gc','hud','btns','exitBtn','specHud','capHud','rlb','limeWarn']
+  if(lobbyId){
+    db.ref('lobbies/'+lobbyId+'/players/'+myId).remove();
+    // If I was the last player, delete the whole lobby and match
+    db.ref('lobbies/'+lobbyId+'/players').once('value').then(snap=>{
+      const pl=snap.val()||{};
+      const real=Object.values(pl).filter(p=>!p.isBot);
+      if(real.length===0){
+        db.ref('lobbies/'+lobbyId).remove();
+        db.ref('match/'+matchId).remove();
+        db.ref('capture').remove();
+      }
+    });
+  }
+  // Remove my bots
+  for(const id of Object.keys(botStates)){
+    if(id.startsWith('bot_')||id.startsWith('npc'))db.ref('players/'+id).remove();
+  }
+  running=false;spectating=false;matchStarted=false;
+  players={};bullets=[];botStates={};remoteBullets={};
+  lobbyId='';matchId='';capBlue=0;capRed=0;
+  // Remove Firebase listeners
+  db.ref('players').off();
+  db.ref('bullets').off();
+  db.ref('hits/'+myId).off();
+  db.ref('doors').off();
+  db.ref('loot').off();
+  db.ref('capture').off();
+  ['exitConfirm','ds','gc','hud','btns','exitBtn','specHud','capHud','rlb','limeWarn','settingsPanel','settingsBtn']
     .forEach(id=>{const el=document.getElementById(id);if(el)el.style.display='none';});
   document.getElementById('lobby').style.display='none';
   document.getElementById('menu').style.display='flex';
@@ -1146,6 +1202,13 @@ function showSettingsBtn(){document.getElementById('settingsBtn').style.display=
 
 function leaveLobby(){
   db.ref('lobbies/'+lobbyId+'/players/'+myId).remove();
+  db.ref('lobbies/'+lobbyId+'/players').once('value').then(snap=>{
+    if(!snap.val()||Object.keys(snap.val()).length===0){
+      db.ref('lobbies/'+lobbyId).remove();
+      db.ref('match/'+matchId).remove();
+    }
+  });
+  lobbyId='';matchId='';
   document.getElementById('lobby').style.display='none';
   document.getElementById('menu').style.display='flex';
 }
